@@ -10,7 +10,7 @@ const ProcessingPanel = ({ current, total, label }: ProcessingPanelProps) => {
   const value = total > 0 ? Math.round((current / total) * 100) : 0
 
   return (
-    <Box w="full" borderWidth="1px" borderColor="blue.100" bg="white" borderRadius="2xl" p={2} shadow="sm">
+    <Box w="full" borderWidth="1px" borderColor="blue.100" bg="white" borderRadius="2xl" p={4} shadow="sm">
       <Stack gap={2}>
         <HStack justify="space-between" gap={2}>
           <Text fontSize="sm" fontWeight="medium" color="gray.700">

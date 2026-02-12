@@ -3,8 +3,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from "react"
 import { FiMonitor, FiPlay, FiSquare, FiUpload } from "react-icons/fi"
 import ProcessingPanel from "./components/ProcessingPanel"
 import ResultPanel from "./components/ResultPanel"
-import { UI_CONFIG } from "./config"
-import { processVideoMaxBrightness } from "./processors"
+import { processVideoToImage } from "./processVideoToImage"
 
 type ProgressState = {
   current: number
@@ -127,7 +126,7 @@ const MemoryGame = () => {
         setProgress({ current, total })
       }
 
-      const result = await processVideoMaxBrightness(blob, onProgress)
+      const result = await processVideoToImage(blob, onProgress)
       setResultImage(result)
     } catch (error) {
       console.error("Processing error:", error)
@@ -363,29 +362,20 @@ const MemoryGame = () => {
                           </span>
                         </HStack>
                       </Button>
-                      {UI_CONFIG.showUploadButton && (
-                        <>
-                          <Input
-                            type="file"
-                            accept="video/*"
-                            ref={fileInputRef}
-                            onChange={handleUpload}
-                            display="none"
-                          />
-                          <Button
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={isProcessing || isRecording}
-                            size="sm"
-                            variant="outline"
-                            colorPalette="blue"
-                          >
-                            <HStack as="span" gap={1}>
-                              <Icon as={FiUpload} boxSize={4} />
-                              <span>Upload Video</span>
-                            </HStack>
-                          </Button>
-                        </>
-                      )}
+
+                      <Input type="file" accept="video/*" ref={fileInputRef} onChange={handleUpload} display="none" />
+                      <Button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isProcessing || isRecording}
+                        size="sm"
+                        variant="outline"
+                        colorPalette="blue"
+                      >
+                        <HStack as="span" gap={1}>
+                          <Icon as={FiUpload} boxSize={4} />
+                          <span>Upload Video</span>
+                        </HStack>
+                      </Button>
                     </HStack>
                   </HStack>
                   <Text fontSize="xs" color="gray.500">
