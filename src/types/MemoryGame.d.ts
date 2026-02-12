@@ -29,3 +29,8 @@ type CardLayoutPercent = {
   gapX: number
   gapY: number
 }
+
+type ErrorNotice = {
+  title: string
+  description: string
+}

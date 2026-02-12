@@ -1,9 +1,11 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react"
+import { createMediaRecorderSession } from "../utils"
 
 type UseRecordingControllerArgs = {
   autoStopEnabled: boolean
   autoStopSeconds?: number
   onRecordedBlob: (blob: Blob) => void
+  onError?: (error: ErrorNotice) => void
 }
 
 type UseRecordingControllerResult = {
@@ -20,14 +22,6 @@ type UseRecordingControllerResult = {
   toggleShareConnection: () => void
 }
 
-const MP4_MIME_CANDIDATES = ["video/mp4"]
-const WEBM_MIME_CANDIDATES = ["video/webm"]
-
-const pickSupportedMimeType = (candidates: string[]): string | null =>
-  candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? null
-
-const getFileExtensionFromMimeType = (mimeType: string): "mp4" | "webm" => (mimeType.includes("mp4") ? "mp4" : "webm")
-
 const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error) {
     return error.message
@@ -35,11 +29,13 @@ const getErrorMessage = (error: unknown): string => {
 
   return "Unknown error"
 }
+const RECORDING_TIMESLICE_MS = 250
 
 const useRecordingController = ({
   autoStopEnabled,
   autoStopSeconds = 5,
   onRecordedBlob,
+  onError,
 }: UseRecordingControllerArgs): UseRecordingControllerResult => {
   const [hasActiveShare, setHasActiveShare] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
@@ -53,7 +49,6 @@ const useRecordingController = ({
   const recordingStreamRef = useRef<MediaStream | null>(null)
   const hiddenPreviewVideoRef = useRef<HTMLVideoElement | null>(null)
   const sidebarPreviewVideoRef = useRef<HTMLVideoElement | null>(null)
-  const chunksRef = useRef<Blob[]>([])
   const recordedVideoUrlRef = useRef<string | null>(null)
 
   const releaseRecordedVideoUrl = useCallback(() => {
@@ -69,6 +64,20 @@ const useRecordingController = ({
     releaseRecordedVideoUrl()
     setRecordedVideoUrl(null)
   }, [releaseRecordedVideoUrl])
+
+  const emitError = useCallback(
+    (title: string, description: string) => {
+      onError?.({ title, description })
+    },
+    [onError],
+  )
+
+  const reportError = useCallback(
+    (title: string, error: unknown) => {
+      emitError(title, getErrorMessage(error))
+    },
+    [emitError],
+  )
 
   const setRecordedVideoBlob = useCallback(
     (blob: Blob, extension: "mp4" | "webm") => {
@@ -114,7 +123,7 @@ const useRecordingController = ({
     mediaRecorderRef.current = null
   }, [])
 
-  const stopRecording = useCallback(() => {
+  const stopRecorder = useCallback((syncUiState: boolean) => {
     if (mediaRecorderRef.current?.state !== "recording") {
       return
     }
@@ -126,8 +135,20 @@ const useRecordingController = ({
     }
 
     mediaRecorderRef.current.stop()
-    setIsRecording(false)
+    if (syncUiState) {
+      setIsRecording(false)
+    }
   }, [])
+
+  const stopRecording = useCallback(() => {
+    stopRecorder(true)
+  }, [stopRecorder])
+
+  const clearShareState = useCallback(() => {
+    setHasActiveShare(false)
+    setRecordingSeconds(0)
+    void attachPreviewStream(null)
+  }, [attachPreviewStream])
 
   const stopSharing = useCallback(() => {
     if (!streamRef.current) {
@@ -136,14 +157,11 @@ const useRecordingController = ({
 
     streamRef.current.getTracks().forEach((track) => track.stop())
     streamRef.current = null
-    setHasActiveShare(false)
-    setRecordingSeconds(0)
-    void attachPreviewStream(null)
-  }, [attachPreviewStream])
+    clearShareState()
+  }, [clearShareState])
 
   const disconnectShare = useCallback(() => {
     stopRecording()
-    chunksRef.current = []
     stopRecordingStream()
     stopSharing()
   }, [stopRecording, stopRecordingStream, stopSharing])
@@ -171,8 +189,7 @@ const useRecordingController = ({
         "ended",
         () => {
           streamRef.current = null
-          setHasActiveShare(false)
-          setRecordingSeconds(0)
+          clearShareState()
           stopRecording()
         },
         { once: true },
@@ -180,18 +197,18 @@ const useRecordingController = ({
     }
 
     return stream
-  }, [attachPreviewStream, stopRecording])
+  }, [attachPreviewStream, clearShareState, stopRecording])
 
   const connectShare = useCallback(async () => {
     try {
       setIsConnecting(true)
       await ensureCaptureStream()
     } catch (error) {
-      alert(`Window connection failed: ${getErrorMessage(error)}`)
+      reportError("Window Connection Failed", error)
     } finally {
       setIsConnecting(false)
     }
-  }, [ensureCaptureStream])
+  }, [ensureCaptureStream, reportError])
 
   const startRecording = useCallback(async () => {
     try {
@@ -204,7 +221,7 @@ const useRecordingController = ({
       const captureTrack = captureStream?.getVideoTracks()[0]
       if (!captureStream || !captureTrack || captureTrack.readyState !== "live") {
         setHasActiveShare(false)
-        alert("Please connect your game window first.")
+        emitError("Recording Unavailable", "Please connect your game window first.")
         return
       }
 
@@ -213,58 +230,34 @@ const useRecordingController = ({
         throw new Error("No captured video track available")
       }
 
-      const recordingStream = new MediaStream([captureVideoTrack.clone()])
+      const { mediaRecorder, recordingStream } = createMediaRecorderSession({
+        captureTrack: captureVideoTrack,
+        onError: () => {
+          emitError("Recording Error", "An error occurred while capturing video. Please try again.")
+        },
+        onStop: ({ blob, extension }) => {
+          stopRecordingStream()
+
+          if (blob.size > 0) {
+            setRecordedVideoBlob(blob, extension)
+            onRecordedBlob(blob)
+            return
+          }
+
+          emitError("Empty Recording", "Recorded video has no data. Please try again.")
+        },
+      })
+
       recordingStreamRef.current = recordingStream
-
-      const mp4MimeType = pickSupportedMimeType(MP4_MIME_CANDIDATES)
-      const fallbackMimeType = pickSupportedMimeType(WEBM_MIME_CANDIDATES)
-      const selectedMimeType = mp4MimeType ?? fallbackMimeType
-
-      let mediaRecorder: MediaRecorder
-      try {
-        mediaRecorder = selectedMimeType
-          ? new MediaRecorder(recordingStream, { mimeType: selectedMimeType })
-          : new MediaRecorder(recordingStream)
-      } catch {
-        mediaRecorder = new MediaRecorder(recordingStream)
-      }
-
       mediaRecorderRef.current = mediaRecorder
-      chunksRef.current = []
 
-      mediaRecorder.ondataavailable = (event: BlobEvent) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data)
-        }
-      }
-
-      mediaRecorder.onerror = (event) => {
-        console.error("Recording error:", event)
-      }
-
-      mediaRecorder.onstop = () => {
-        stopRecordingStream()
-
-        const outputMimeType = mediaRecorder.mimeType || selectedMimeType || "video/webm"
-        const blob = new Blob(chunksRef.current, { type: outputMimeType })
-        const extension = getFileExtensionFromMimeType(outputMimeType)
-        chunksRef.current = []
-
-        if (blob.size > 0) {
-          setRecordedVideoBlob(blob, extension)
-          onRecordedBlob(blob)
-        } else {
-          alert("Recorded video is empty. Please try again.")
-        }
-      }
-
-      mediaRecorder.start(250)
+      mediaRecorder.start(RECORDING_TIMESLICE_MS)
       setRecordingSeconds(0)
       setIsRecording(true)
     } catch (error) {
-      alert(`Recording failed: ${getErrorMessage(error)}`)
+      reportError("Recording Failed", error)
     }
-  }, [onRecordedBlob, setRecordedVideoBlob, stopRecordingStream])
+  }, [emitError, onRecordedBlob, reportError, setRecordedVideoBlob, stopRecordingStream])
 
   const downloadRecordedVideo = useCallback(() => {
     if (!recordedVideoUrl) {
@@ -321,8 +314,7 @@ const useRecordingController = ({
     const sidebarPreviewVideo = sidebarPreviewVideoRef.current
 
     return () => {
-      stopRecording()
-      setRecordingSeconds(0)
+      stopRecorder(false)
       stopRecordingStream()
 
       if (streamRef.current) {
@@ -340,7 +332,7 @@ const useRecordingController = ({
 
       releaseRecordedVideoUrl()
     }
-  }, [releaseRecordedVideoUrl, stopRecording, stopRecordingStream])
+  }, [releaseRecordedVideoUrl, stopRecorder, stopRecordingStream])
 
   return {
     downloadRecordedVideo,

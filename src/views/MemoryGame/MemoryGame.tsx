@@ -1,53 +1,28 @@
 import { Box, Button, Heading, Icon, Stack, Text } from "@chakra-ui/react"
+import { toaster } from "components/ui/toaster"
 import { type ChangeEvent, useCallback, useRef, useState } from "react"
 import { FiSettings } from "react-icons/fi"
-import PreviewSidebar from "./components/PreviewSidebar"
-import RecordingActions from "./components/RecordingActions"
-import ResultPanel from "./components/ResultPanel"
-import SettingsDialog from "./components/SettingsDialog"
-import useRecordingController from "./hooks/useRecordingController"
-import { processVideoToImage } from "./processVideoToImage"
-
-type ProgressState = {
-  current: number
-  total: number
-}
-
-const getErrorMessage = (error: unknown): string => {
-  if (error instanceof Error) {
-    return error.message
-  }
-
-  return "Unknown error"
-}
+import { PreviewSidebar, RecordingActions, ResultPanel, SettingsDialog } from "./components"
+import { useRecordingController, useVideoProcessing } from "./hooks"
 
 const MemoryGame = () => {
   const [isAutoStopEnabled, setIsAutoStopEnabled] = useState(true)
   const [isConnectedPreviewVisible, setIsConnectedPreviewVisible] = useState(true)
-  const [isProcessing, setIsProcessing] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [progress, setProgress] = useState<ProgressState>({ current: 0, total: 0 })
-  const [resultImage, setResultImage] = useState<string | null>(null)
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  const processVideo = useCallback(async (blob: Blob) => {
-    setIsProcessing(true)
-    setProgress({ current: 0, total: 0 })
-    setResultImage(null)
-
-    try {
-      const result = await processVideoToImage(blob, (current, total) => {
-        setProgress({ current, total })
-      })
-      setResultImage(result)
-    } catch (error) {
-      console.error("Processing error:", error)
-      alert(`Processing failed: ${getErrorMessage(error)}`)
-    } finally {
-      setIsProcessing(false)
-    }
+  const showError = useCallback((error: ErrorNotice) => {
+    toaster.create({
+      description: error.description,
+      title: error.title,
+      type: "error",
+    })
   }, [])
+
+  const { clearResult, isProcessing, processVideo, progress, resultImage } = useVideoProcessing({
+    onError: showError,
+  })
 
   const handleRecordedBlob = useCallback(
     (blob: Blob) => {
@@ -83,14 +58,9 @@ const MemoryGame = () => {
     toggleShareConnection,
   } = useRecordingController({
     autoStopEnabled: isAutoStopEnabled,
+    onError: showError,
     onRecordedBlob: handleRecordedBlob,
   })
-
-  const handleReset = useCallback(() => {
-    setResultImage(null)
-    setProgress({ current: 0, total: 0 })
-    setIsProcessing(false)
-  }, [])
 
   return (
     <Box minH="100vh" bgGradient="linear(to-br, gray.100, white, blue.50)">
@@ -190,7 +160,7 @@ const MemoryGame = () => {
                 processingCurrent={progress.current}
                 processingTotal={progress.total}
                 isProcessing={isProcessing}
-                onClear={handleReset}
+                onClear={clearResult}
               />
             </Stack>
 

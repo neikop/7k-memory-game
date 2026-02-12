@@ -21,7 +21,7 @@
   - Merge per-card (8x3 grid) and keep the best frame per cell based on
     "revealed content" confidence and local sharpness.
 */
-export const PROCESSING_CONFIG = {
+const PROCESSING_CONFIG = {
   // Process only N frames per second (skip intermediate frames).
   fps: 10,
   // Scale frame before pixel analysis (0.5 = 50% of original size).
