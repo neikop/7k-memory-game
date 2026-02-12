@@ -1,4 +1,4 @@
-﻿/*
+/*
   Memory Game Video -> Result Image
 
   Business context:
@@ -16,10 +16,10 @@
   - Noisy frames / non-reveal frames must be filtered out:
     for example pre-start screens, popups, text overlays, and transition effects.
 
-  Current status:
-  - This version keeps phase detection to filter pre-start noise.
-  - The merge strategy is intentionally simple (max brightness over changed pixels)
-    to preserve card detail/text sharpness.
+  Current strategy:
+  - Detect the active gameplay range first (avoid pre-start and end-state noise).
+  - Merge per-card (8x3 grid) and keep the best frame per cell based on
+    "revealed content" confidence and local sharpness.
 */
 export const PROCESSING_CONFIG = {
   // Process only N frames per second (skip intermediate frames).
@@ -40,13 +40,6 @@ export const PROCESSING_CONFIG = {
     gapX: 0.01625,
     gapY: 0.02775,
   },
-  // Extra copy padding around each card area (ratio of card size).
-  cardAreaBufferPercent: {
-    left: 0.015,
-    right: 0.015,
-    top: 0.04,
-    bottom: 0.02,
-  },
 }
 
 // Internal tuning for motion detection and active-range extraction.
@@ -64,51 +57,17 @@ const ANALYSIS_SCALE_DOWN = 0.25
 const GRID_COLS = 8
 const GRID_ROWS = 3
 const CARD_EVAL_INSET_RATIO = 0.12
+const CARD_COPY_BUFFER_RATIO = { left: 0.015, right: 0.015, top: 0.04, bottom: 0.02 }
 const CARD_MIN_DIFF_RATIO = 0.08
 const CARD_MAX_LOCAL_MOTION_RATIO = 0.25
 const CARD_CANDIDATE_LIMIT = 3
 const SHARPEN_STRENGTH = 0.35
-
-type FrameMetrics = {
-  baselineRatio: number
-  motionRatio: number
-}
-
-type Rect = {
-  left: number
-  top: number
-  right: number
-  bottom: number
-}
-
-type GridCellRegion = {
-  copyRect: Rect
-  evalRect: Rect
-  evalPixelCount: number
-}
-
-type CardCandidate = {
-  frameIndex: number
-  score: number
-}
-
-type CardLayoutPercent = {
-  left: number
-  top: number
-  cardWidth: number
-  cardHeight: number
-  gapX: number
-  gapY: number
-}
-
-type CardAreaBufferPercent = {
-  left: number
-  right: number
-  top: number
-  bottom: number
-}
+const BASELINE_SAMPLE_OFFSET_SECONDS = 0.1
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
+
+const shouldEmitProgress = (completed: number, total: number): boolean =>
+  completed % PROCESSING_CONFIG.progressUpdateInterval === 0 || completed === total
 
 const isValidCardLayoutPercent = (layout: CardLayoutPercent): boolean => {
   if (layout.cardWidth <= 0 || layout.cardHeight <= 0 || layout.gapX < 0 || layout.gapY < 0) {
@@ -121,8 +80,43 @@ const isValidCardLayoutPercent = (layout: CardLayoutPercent): boolean => {
   return layout.left >= 0 && layout.top >= 0 && totalWidth <= 1 && totalHeight <= 1
 }
 
-const isValidCardAreaBufferPercent = (buffer: CardAreaBufferPercent): boolean =>
-  buffer.left >= 0 && buffer.right >= 0 && buffer.top >= 0 && buffer.bottom >= 0
+const toGridCellRegion = (
+  baseRect: Rect,
+  frameWidth: number,
+  frameHeight: number,
+  copyBufferRatio?: typeof CARD_COPY_BUFFER_RATIO,
+): GridCellRegion => {
+  // Use a smaller inner region for scoring to avoid card borders/shadows affecting metrics.
+  const cellWidth = Math.max(1, baseRect.right - baseRect.left)
+  const cellHeight = Math.max(1, baseRect.bottom - baseRect.top)
+  const insetX = Math.floor(cellWidth * CARD_EVAL_INSET_RATIO)
+  const insetY = Math.floor(cellHeight * CARD_EVAL_INSET_RATIO)
+
+  const evalLeft = clamp(baseRect.left + insetX, baseRect.left, baseRect.right - 1)
+  const evalRight = clamp(baseRect.right - insetX, evalLeft + 1, baseRect.right)
+  const evalTop = clamp(baseRect.top + insetY, baseRect.top, baseRect.bottom - 1)
+  const evalBottom = clamp(baseRect.bottom - insetY, evalTop + 1, baseRect.bottom)
+
+  if (!copyBufferRatio) {
+    return {
+      copyRect: baseRect,
+      evalRect: { left: evalLeft, top: evalTop, right: evalRight, bottom: evalBottom },
+      evalPixelCount: Math.max(1, (evalRight - evalLeft) * (evalBottom - evalTop)),
+    }
+  }
+
+  // Expand copy area slightly so the final merge keeps anti-aliased text/edge pixels.
+  const copyLeft = clamp(baseRect.left - Math.round(cellWidth * copyBufferRatio.left), 0, Math.max(0, frameWidth - 2))
+  const copyRight = clamp(baseRect.right + Math.round(cellWidth * copyBufferRatio.right), copyLeft + 1, frameWidth)
+  const copyTop = clamp(baseRect.top - Math.round(cellHeight * copyBufferRatio.top), 0, Math.max(0, frameHeight - 2))
+  const copyBottom = clamp(baseRect.bottom + Math.round(cellHeight * copyBufferRatio.bottom), copyTop + 1, frameHeight)
+
+  return {
+    copyRect: { left: copyLeft, top: copyTop, right: copyRight, bottom: copyBottom },
+    evalRect: { left: evalLeft, top: evalTop, right: evalRight, bottom: evalBottom },
+    evalPixelCount: Math.max(1, (evalRight - evalLeft) * (evalBottom - evalTop)),
+  }
+}
 
 const buildUniformGridRegions = (width: number, height: number): GridCellRegion[] => {
   const xEdges = Array.from({ length: GRID_COLS + 1 }, (_, index) => Math.round((index / GRID_COLS) * width))
@@ -136,21 +130,7 @@ const buildUniformGridRegions = (width: number, height: number): GridCellRegion[
       const top = yEdges[row]
       const bottom = yEdges[row + 1]
 
-      const cellWidth = Math.max(1, right - left)
-      const cellHeight = Math.max(1, bottom - top)
-      const insetX = Math.floor(cellWidth * CARD_EVAL_INSET_RATIO)
-      const insetY = Math.floor(cellHeight * CARD_EVAL_INSET_RATIO)
-
-      const evalLeft = clamp(left + insetX, left, right - 1)
-      const evalRight = clamp(right - insetX, evalLeft + 1, right)
-      const evalTop = clamp(top + insetY, top, bottom - 1)
-      const evalBottom = clamp(bottom - insetY, evalTop + 1, bottom)
-
-      regions.push({
-        copyRect: { left, top, right, bottom },
-        evalRect: { left: evalLeft, top: evalTop, right: evalRight, bottom: evalBottom },
-        evalPixelCount: Math.max(1, (evalRight - evalLeft) * (evalBottom - evalTop)),
-      })
+      regions.push(toGridCellRegion({ left, top, right, bottom }, width, height))
     }
   }
 
@@ -160,10 +140,9 @@ const buildUniformGridRegions = (width: number, height: number): GridCellRegion[
 const buildGridRegions = (width: number, height: number): GridCellRegion[] => {
   const layout = PROCESSING_CONFIG.cardLayoutPercent
   if (!isValidCardLayoutPercent(layout)) {
+    // Fallback for unknown layouts/videos: treat the board as a plain 8x3 uniform grid.
     return buildUniformGridRegions(width, height)
   }
-  const buffer = PROCESSING_CONFIG.cardAreaBufferPercent
-  const hasValidBuffer = isValidCardAreaBufferPercent(buffer)
 
   const regions: GridCellRegion[] = []
 
@@ -177,33 +156,7 @@ const buildGridRegions = (width: number, height: number): GridCellRegion[] => {
       const top = clamp(Math.round(topPercent * height), 0, Math.max(0, height - 2))
       const bottom = clamp(Math.round((topPercent + layout.cardHeight) * height), top + 1, height)
 
-      const cellWidth = Math.max(1, right - left)
-      const cellHeight = Math.max(1, bottom - top)
-      const copyLeft = hasValidBuffer
-        ? clamp(left - Math.round(cellWidth * buffer.left), 0, Math.max(0, width - 2))
-        : left
-      const copyRight = hasValidBuffer
-        ? clamp(right + Math.round(cellWidth * buffer.right), copyLeft + 1, width)
-        : right
-      const copyTop = hasValidBuffer
-        ? clamp(top - Math.round(cellHeight * buffer.top), 0, Math.max(0, height - 2))
-        : top
-      const copyBottom = hasValidBuffer
-        ? clamp(bottom + Math.round(cellHeight * buffer.bottom), copyTop + 1, height)
-        : bottom
-      const insetX = Math.floor(cellWidth * CARD_EVAL_INSET_RATIO)
-      const insetY = Math.floor(cellHeight * CARD_EVAL_INSET_RATIO)
-
-      const evalLeft = clamp(left + insetX, left, right - 1)
-      const evalRight = clamp(right - insetX, evalLeft + 1, right)
-      const evalTop = clamp(top + insetY, top, bottom - 1)
-      const evalBottom = clamp(bottom - insetY, evalTop + 1, bottom)
-
-      regions.push({
-        copyRect: { left: copyLeft, top: copyTop, right: copyRight, bottom: copyBottom },
-        evalRect: { left: evalLeft, top: evalTop, right: evalRight, bottom: evalBottom },
-        evalPixelCount: Math.max(1, (evalRight - evalLeft) * (evalBottom - evalTop)),
-      })
+      regions.push(toGridCellRegion({ left, top, right, bottom }, width, height, CARD_COPY_BUFFER_RATIO))
     }
   }
 
@@ -243,6 +196,28 @@ const pushCardCandidate = (candidates: CardCandidate[], next: CardCandidate): vo
   if (candidates.length > CARD_CANDIDATE_LIMIT) {
     candidates.length = CARD_CANDIDATE_LIMIT
   }
+}
+
+const countFrameDiffs = (
+  currentPixels: Uint8ClampedArray,
+  baselinePixels: Uint8ClampedArray,
+  baselineThreshold: number,
+  previousPixels?: Uint8ClampedArray,
+): { baselineChanged: number; motionChanged: number } => {
+  let baselineChanged = 0
+  let motionChanged = 0
+
+  for (let offset = 0; offset < currentPixels.length; offset += 4) {
+    if (getBrightnessDiff(currentPixels, baselinePixels, offset) > baselineThreshold) {
+      baselineChanged += 1
+    }
+
+    if (previousPixels && getBrightnessDiff(currentPixels, previousPixels, offset) > MOTION_THRESHOLD) {
+      motionChanged += 1
+    }
+  }
+
+  return { baselineChanged, motionChanged }
 }
 
 const applySharpen = (imageData: ImageData, width: number, height: number, strength: number): void => {
@@ -306,6 +281,7 @@ const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: 
   }
 
   if (firstActive === -1 || lastActive === -1) {
+    // If detection fails, keep everything to avoid returning an empty/over-filtered result.
     return { start: 0, end: metrics.length - 1 }
   }
 
@@ -315,11 +291,33 @@ const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: 
   }
 }
 
+const buildMergeFrameIndices = (metrics: FrameMetrics[], range: { start: number; end: number }): number[] => {
+  const filtered: number[] = []
+
+  // Prefer frames with board-like baseline difference; this removes overlays/transitions.
+  for (let frameIndex = range.start; frameIndex <= range.end; frameIndex += 1) {
+    if (isBaselineWithinActiveRange(metrics[frameIndex].baselineRatio)) {
+      filtered.push(frameIndex)
+    }
+  }
+
+  if (filtered.length > 0) {
+    return filtered
+  }
+
+  // Safety fallback: if filtering is too strict for a specific recording, merge the whole active range.
+  const fullRange: number[] = []
+  for (let frameIndex = range.start; frameIndex <= range.end; frameIndex += 1) {
+    fullRange.push(frameIndex)
+  }
+  return fullRange
+}
+
 export const processVideoToImage = async (
   blob: Blob,
   onProgress?: (current: number, total: number) => void,
 ): Promise<string> => {
-  // Browser-only decode path: HTMLVideoElement + Canvas (no ffmpeg/OpenCV).
+  // Browser-only decode path: HTMLVideoElement + Canvas (no ffmpeg/OpenCV dependency).
   const video = document.createElement("video")
   video.preload = "auto"
   video.muted = true
@@ -346,6 +344,7 @@ export const processVideoToImage = async (
       video.src = objectUrl
     })
 
+    // Seek helper with safe clamping. Some browsers throw/loop on out-of-range seeks near duration.
     const seekTo = (requestedTime: number, options?: { preferFastSeek?: boolean }): Promise<void> => {
       const maxTime = Number.isFinite(video.duration) ? Math.max(video.duration - 0.001, 0) : 0
       const targetTime = Math.min(Math.max(requestedTime, 0), maxTime)
@@ -406,10 +405,15 @@ export const processVideoToImage = async (
 
     onProgress?.(0, totalProgressFrames)
 
-    // Baseline is sampled near the end and used as the reference for pixel-difference checks.
-    // Emit first progress tick so users see processing starts immediately after upload.
+    /*
+      Baseline selection:
+      - We sample near the end (`duration - BASELINE_SAMPLE_OFFSET_SECONDS`) because this game
+        usually returns to a mostly face-down board in the final state.
+      - That frame is used as a "reference board" to estimate which pixels are true card reveals.
+      - The small offset avoids edge cases where decoding the exact final timestamp fails.
+    */
     onProgress?.(1, totalProgressFrames)
-    await seekTo(video.duration - 0.1, { preferFastSeek: true })
+    await seekTo(video.duration - BASELINE_SAMPLE_OFFSET_SECONDS, { preferFastSeek: true })
     analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
     const analysisBaselineData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
     outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
@@ -427,30 +431,12 @@ export const processVideoToImage = async (
       const baselinePixels = analysisBaselineData.data
       const previousPixels = previousFrameData?.data
 
-      let baselineChanged = 0
-      let motionChanged = 0
-
-      for (let offset = 0; offset < currentPixels.length; offset += 4) {
-        const baselineDiff =
-          (Math.abs(currentPixels[offset] - baselinePixels[offset]) +
-            Math.abs(currentPixels[offset + 1] - baselinePixels[offset + 1]) +
-            Math.abs(currentPixels[offset + 2] - baselinePixels[offset + 2])) /
-          3
-        if (baselineDiff > PROCESSING_CONFIG.threshold) {
-          baselineChanged += 1
-        }
-
-        if (previousPixels) {
-          const motionDiff =
-            (Math.abs(currentPixels[offset] - previousPixels[offset]) +
-              Math.abs(currentPixels[offset + 1] - previousPixels[offset + 1]) +
-              Math.abs(currentPixels[offset + 2] - previousPixels[offset + 2])) /
-            3
-          if (motionDiff > MOTION_THRESHOLD) {
-            motionChanged += 1
-          }
-        }
-      }
+      const { baselineChanged, motionChanged } = countFrameDiffs(
+        currentPixels,
+        baselinePixels,
+        PROCESSING_CONFIG.threshold,
+        previousPixels,
+      )
 
       frameMetrics[frameIndex] = {
         baselineRatio: baselineChanged / analysisPixelCount,
@@ -459,25 +445,13 @@ export const processVideoToImage = async (
       previousFrameData = currentData
 
       const analyzedFrames = frameIndex + 1
-      if (analyzedFrames % PROCESSING_CONFIG.progressUpdateInterval === 0 || analyzedFrames === frameCount) {
+      if (shouldEmitProgress(analyzedFrames, frameCount)) {
         onProgress?.(analyzedFrames, totalProgressFrames)
       }
     }
 
     const activeRange = detectActiveFrameRange(frameMetrics)
-
-    // Keep only frames that look like board-content frames; fallback to full range if empty.
-    const mergeFrameIndices: number[] = []
-    for (let frameIndex = activeRange.start; frameIndex <= activeRange.end; frameIndex += 1) {
-      if (isBaselineWithinActiveRange(frameMetrics[frameIndex].baselineRatio)) {
-        mergeFrameIndices.push(frameIndex)
-      }
-    }
-    if (mergeFrameIndices.length === 0) {
-      for (let frameIndex = activeRange.start; frameIndex <= activeRange.end; frameIndex += 1) {
-        mergeFrameIndices.push(frameIndex)
-      }
-    }
+    const mergeFrameIndices = buildMergeFrameIndices(frameMetrics, activeRange)
 
     const mergeFrameCount = mergeFrameIndices.length
 
@@ -488,6 +462,7 @@ export const processVideoToImage = async (
     const resultPixels = result.data
     const gridRegions = buildGridRegions(outputCanvas.width, outputCanvas.height)
     const bestCellScores = new Float32Array(gridRegions.length).fill(-1)
+    // Keep top candidates per cell so fallback can fill partial misses.
     const cellCandidates: CardCandidate[][] = Array.from({ length: gridRegions.length }, () => [])
     let previousMergePixels: Uint8ClampedArray | null = null
 
@@ -529,6 +504,7 @@ export const processVideoToImage = async (
 
         const changedRatio = changedPixels / evalPixelCount
         if (changedRatio < CARD_MIN_DIFF_RATIO) {
+          // Not enough revealed content in this cell yet.
           continue
         }
 
@@ -536,12 +512,14 @@ export const processVideoToImage = async (
           ? localMotionPixels / evalPixelCount
           : frameMetrics[frameIndex].motionRatio
         if (localMotionRatio > CARD_MAX_LOCAL_MOTION_RATIO) {
+          // Skip frames where this cell is likely in transition blur.
           continue
         }
 
         const meanBrightness = brightnessSum / evalPixelCount
         const brightnessVariance = Math.max(0, brightnessSqSum / evalPixelCount - meanBrightness * meanBrightness)
         const motionPenalty = 1 / (1 + localMotionRatio * 25)
+        // Higher variance often means richer face-up card detail (text/icon), not a flat back-face.
         const score = changedRatio * brightnessVariance * motionPenalty
 
         pushCardCandidate(cellCandidates[cellIndex], { frameIndex, score })
@@ -553,7 +531,7 @@ export const processVideoToImage = async (
       }
 
       const activeProgress = mergeIndex + 1
-      if (activeProgress % PROCESSING_CONFIG.progressUpdateInterval === 0 || activeProgress === mergeFrameCount) {
+      if (shouldEmitProgress(activeProgress, mergeFrameCount)) {
         const mergeProgressFrames = Math.max(1, Math.round((activeProgress / mergeFrameCount) * frameCount))
         onProgress?.(frameCount + mergeProgressFrames, totalProgressFrames)
       }
