@@ -44,7 +44,7 @@ const ResultPanel = ({ resultImage, isProcessing, onClear }: ResultPanelProps) =
             variant="outline"
             alignSelf={{ base: "flex-start", sm: "auto" }}
           >
-            Clear Result
+            Clear
           </Button>
         </Stack>
         <Box overflow="hidden" borderWidth="1px" borderColor="gray.200" borderRadius="2xl" bg="gray.50" p={1}>

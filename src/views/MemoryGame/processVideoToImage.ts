@@ -252,15 +252,7 @@ const applySharpen = (imageData: ImageData, width: number, height: number, stren
 const isBaselineWithinActiveRange = (baselineRatio: number): boolean =>
   baselineRatio >= ACTIVE_RANGE_RULES.minBaselineRatio && baselineRatio <= ACTIVE_RANGE_RULES.maxBaselineRatio
 
-const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: number } => {
-  if (metrics.length === 0) {
-    return { start: 0, end: 0 }
-  }
-
-  const candidate = metrics.map(({ baselineRatio, motionRatio }) => {
-    return isBaselineWithinActiveRange(baselineRatio) && motionRatio >= ACTIVE_RANGE_RULES.minMotionRatio
-  })
-
+const findActiveStreakRange = (candidate: boolean[]): { start: number; end: number } | null => {
   let streak = 0
   let firstActive = -1
   let lastActive = -1
@@ -281,14 +273,44 @@ const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: 
   }
 
   if (firstActive === -1 || lastActive === -1) {
-    // If detection fails, keep everything to avoid returning an empty/over-filtered result.
-    return { start: 0, end: metrics.length - 1 }
+    return null
   }
 
   return {
     start: Math.max(0, firstActive - ACTIVE_RANGE_RULES.marginFrames),
-    end: Math.min(metrics.length - 1, lastActive + ACTIVE_RANGE_RULES.marginFrames),
+    end: Math.min(candidate.length - 1, lastActive + ACTIVE_RANGE_RULES.marginFrames),
   }
+}
+
+const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: number } => {
+  if (metrics.length === 0) {
+    return { start: 0, end: 0 }
+  }
+
+  const strictCandidate = metrics.map(({ baselineRatio, motionRatio }) => {
+    return isBaselineWithinActiveRange(baselineRatio) && motionRatio >= ACTIVE_RANGE_RULES.minMotionRatio
+  })
+
+  const strictRange = findActiveStreakRange(strictCandidate)
+  if (strictRange) {
+    return strictRange
+  }
+
+  // Fallback: motion-only range helps when baseline-ratio heuristics are too strict
+  // (for example long idle at the beginning or unusual board state near the end).
+  const maxMotionRatio = metrics.reduce((max, metric) => Math.max(max, metric.motionRatio), 0)
+  const fallbackMotionThreshold = Math.max(ACTIVE_RANGE_RULES.minMotionRatio, maxMotionRatio * 0.35)
+  const fallbackBaselineThreshold = ACTIVE_RANGE_RULES.minBaselineRatio * 0.5
+  const motionCandidate = metrics.map(({ baselineRatio, motionRatio }) => {
+    return motionRatio >= fallbackMotionThreshold && baselineRatio >= fallbackBaselineThreshold
+  })
+  const motionRange = findActiveStreakRange(motionCandidate)
+  if (motionRange) {
+    return motionRange
+  }
+
+  // If all detection fails, keep everything to avoid returning an empty result.
+  return { start: 0, end: metrics.length - 1 }
 }
 
 const buildMergeFrameIndices = (metrics: FrameMetrics[], range: { start: number; end: number }): number[] => {
@@ -303,6 +325,22 @@ const buildMergeFrameIndices = (metrics: FrameMetrics[], range: { start: number;
 
   if (filtered.length > 0) {
     return filtered
+  }
+
+  const motionFallback: number[] = []
+  const maxMotionRatio = metrics
+    .slice(range.start, range.end + 1)
+    .reduce((max, metric) => Math.max(max, metric.motionRatio), 0)
+  const motionThreshold = Math.max(ACTIVE_RANGE_RULES.minMotionRatio, maxMotionRatio * 0.35)
+  const baselineThreshold = ACTIVE_RANGE_RULES.minBaselineRatio * 0.5
+  for (let frameIndex = range.start; frameIndex <= range.end; frameIndex += 1) {
+    if (metrics[frameIndex].motionRatio >= motionThreshold && metrics[frameIndex].baselineRatio >= baselineThreshold) {
+      motionFallback.push(frameIndex)
+    }
+  }
+
+  if (motionFallback.length > 0) {
+    return motionFallback
   }
 
   // Safety fallback: if filtering is too strict for a specific recording, merge the whole active range.

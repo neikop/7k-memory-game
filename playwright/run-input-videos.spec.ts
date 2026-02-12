@@ -37,7 +37,7 @@ test("processes all videos in artifacts/input and exports png outputs in a times
 
   const fileInputSelector = 'input[type="file"]'
   const resultImage = page.getByAltText(RESULT_IMAGE_ALT)
-  const clearResultButton = page.getByRole("button", { name: "Clear Result" })
+  const clearResultButton = page.getByRole("button", { name: "Clear" })
 
   for (let index = 0; index < videoFiles.length; index += 1) {
     const fileName = videoFiles[index]
