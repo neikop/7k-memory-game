@@ -1,0 +1,9 @@
+:root {
+  font-weight: 500;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--global-color-border) transparent;
+  outline: none !important;
+}
