@@ -4,6 +4,7 @@ import { buttonRecipe } from "./button.recipe"
 import { linkRecipe } from "./link.recipe"
 
 const config = defineConfig({
+  preflight: false,
   globalCss: {},
   theme: {
     recipes: {

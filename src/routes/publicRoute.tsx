@@ -1,9 +1,8 @@
-import { Home } from "views/Home"
 import { MemoryGame } from "views/MemoryGame"
 
 const publicRoute = {
   home: {
-    component: Home,
+    component: MemoryGame,
     name: "Home",
     path: "/",
   },

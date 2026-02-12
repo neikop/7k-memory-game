@@ -1,3 +1,5 @@
+import { Box, HStack, Text } from "@chakra-ui/react"
+
 type ProgressBarProps = {
   current: number
   total: number
@@ -8,20 +10,28 @@ const ProgressBar = ({ current, total, label }: ProgressBarProps) => {
   const percentage = total > 0 ? Math.round((current / total) * 100) : 0
 
   return (
-    <div className="mb-6 w-full rounded-lg border border-gray-200 bg-white p-4">
-      {label && <div className="mb-2 text-sm text-gray-700">{label}</div>}
-      <div className="h-6 w-full overflow-hidden rounded-full bg-gray-200">
-        <div
-          className="flex h-full items-center justify-center bg-blue-600 text-sm font-medium text-white transition-all duration-300"
+    <Box mb={6} w="full" borderWidth="1px" borderColor="blue.100" bg="white" borderRadius="2xl" p={4} shadow="sm">
+      <HStack mb={3} justify="space-between" gap={3}>
+        <Text fontSize="sm" fontWeight="medium" color="gray.700">
+          {label ?? "Processing..."}
+        </Text>
+        <Text fontSize="xs" fontWeight="semibold" color="blue.700">
+          {percentage}%
+        </Text>
+      </HStack>
+      <Box h="3" w="full" overflow="hidden" borderRadius="full" bg="blue.100">
+        <Box
+          h="full"
+          borderRadius="full"
+          bgGradient="linear(to-r, blue.500, purple.500)"
+          transition="width 0.3s ease"
           style={{ width: `${percentage}%` }}
-        >
-          {percentage > 10 && `${percentage}%`}
-        </div>
-      </div>
-      <div className="mt-2 text-xs text-gray-500">
+        />
+      </Box>
+      <Text mt={2} fontSize="xs" color="gray.500">
         Frame {current} / {total}
-      </div>
-    </div>
+      </Text>
+    </Box>
   )
 }
 
