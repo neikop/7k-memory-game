@@ -35,7 +35,9 @@ const PreviewSidebar = ({
 
   return (
     <Box
-      w={{ base: "full", lg: "300px" }}
+      w={{ base: "full", lg: "360px" }}
+      h="fit-content"
+      maxW="600px"
       flexShrink={0}
       borderWidth="1px"
       borderColor="gray.200"
@@ -43,6 +45,14 @@ const PreviewSidebar = ({
       borderRadius="3xl"
       p={4}
       shadow="sm"
+      css={{
+        "@media (min-width: 1920px)": {
+          width: "480px",
+        },
+        "@media (min-width: 2560px)": {
+          width: "600px",
+        },
+      }}
     >
       <Stack gap={3}>
         <Text fontSize="xs" fontWeight="semibold" textTransform="uppercase" letterSpacing="widest" color="gray.500">
@@ -65,7 +75,7 @@ const PreviewSidebar = ({
         <Box
           position="relative"
           w="full"
-          h="220px"
+          aspectRatio="16 / 9"
           overflow="hidden"
           borderWidth="1px"
           borderColor="gray.200"
