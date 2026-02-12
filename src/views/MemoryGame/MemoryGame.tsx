@@ -1,4 +1,4 @@
-import { Box, Button, Heading, Icon, Stack, Text } from "@chakra-ui/react"
+import { Box, Button, Heading, Icon, Stack, Text, Tooltip } from "@chakra-ui/react"
 import { toaster } from "components/ui/toaster"
 import { type ChangeEvent, useCallback, useRef, useState } from "react"
 import { FiSettings } from "react-icons/fi"
@@ -99,20 +99,27 @@ const MemoryGame = () => {
                 p={4}
                 shadow="sm"
               >
-                <Button
-                  aria-label="Open settings"
-                  onClick={() => setIsSettingsOpen(true)}
-                  size="sm"
-                  variant="outline"
-                  colorPalette="gray"
-                  minW="8"
-                  px={0}
-                  position="absolute"
-                  top={4}
-                  right={4}
-                >
-                  <Icon as={FiSettings} boxSize={4} />
-                </Button>
+                <Tooltip.Root positioning={{ placement: "left" }}>
+                  <Tooltip.Trigger asChild>
+                    <Button
+                      aria-label="Open settings"
+                      onClick={() => setIsSettingsOpen(true)}
+                      size="sm"
+                      variant="outline"
+                      colorPalette="gray"
+                      minW="8"
+                      px={0}
+                      position="absolute"
+                      top={4}
+                      right={4}
+                    >
+                      <Icon as={FiSettings} boxSize={4} />
+                    </Button>
+                  </Tooltip.Trigger>
+                  <Tooltip.Positioner>
+                    <Tooltip.Content>Settings</Tooltip.Content>
+                  </Tooltip.Positioner>
+                </Tooltip.Root>
 
                 <Stack gap={4}>
                   <Stack gap={1} pr={10}>

@@ -20,7 +20,7 @@ const getErrorMessage = (error: unknown): string => {
   return "Unknown error"
 }
 
-const useVideoProcessing = ({ onError }: UseVideoProcessingArgs = {}) => {
+export const useVideoProcessing = ({ onError }: UseVideoProcessingArgs = {}) => {
   const [isProcessing, setIsProcessing] = useState(false)
   const [progress, setProgress] = useState<ProgressState>(INITIAL_PROGRESS)
   const [resultImage, setResultImage] = useState<string | null>(null)
@@ -61,5 +61,3 @@ const useVideoProcessing = ({ onError }: UseVideoProcessingArgs = {}) => {
     resultImage,
   }
 }
-
-export default useVideoProcessing

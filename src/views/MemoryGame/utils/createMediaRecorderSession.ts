@@ -33,7 +33,7 @@ const createMediaRecorder = (stream: MediaStream, mimeType: string | null): Medi
   }
 }
 
-const createMediaRecorderSession = ({
+export const createMediaRecorderSession = ({
   captureTrack,
   onError,
   onStop,
@@ -70,5 +70,3 @@ const createMediaRecorderSession = ({
     recordingStream,
   }
 }
-
-export default createMediaRecorderSession

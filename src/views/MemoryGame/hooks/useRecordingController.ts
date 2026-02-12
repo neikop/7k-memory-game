@@ -31,7 +31,7 @@ const getErrorMessage = (error: unknown): string => {
 }
 const RECORDING_TIMESLICE_MS = 250
 
-const useRecordingController = ({
+export const useRecordingController = ({
   autoStopEnabled,
   autoStopSeconds = 5,
   onRecordedBlob,
@@ -348,5 +348,3 @@ const useRecordingController = ({
     toggleShareConnection,
   }
 }
-
-export default useRecordingController
