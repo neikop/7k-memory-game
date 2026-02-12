@@ -6,5 +6,5 @@ export const PROCESSING_CONFIG = {
 } as const
 
 export const UI_CONFIG = {
-  showUploadButton: false,
+  showUploadButton: true,
 } as const
