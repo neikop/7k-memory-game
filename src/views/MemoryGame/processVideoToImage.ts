@@ -30,6 +30,23 @@ export const PROCESSING_CONFIG = {
   threshold: 30,
   // Emit UI progress every N analyzed/merged frames.
   progressUpdateInterval: 5,
+  // Card layout percentages relative to full processed frame.
+  // Tune these values when source videos use a different UI scale/layout.
+  cardLayoutPercent: {
+    left: 0.07525,
+    top: 0.2295,
+    cardWidth: 0.092,
+    cardHeight: 0.22425,
+    gapX: 0.01625,
+    gapY: 0.02775,
+  },
+  // Extra copy padding around each card area (ratio of card size).
+  cardAreaBufferPercent: {
+    left: 0.015,
+    right: 0.015,
+    top: 0.04,
+    bottom: 0.02,
+  },
 }
 
 // Internal tuning for motion detection and active-range extraction.
@@ -75,9 +92,39 @@ type CardCandidate = {
   score: number
 }
 
+type CardLayoutPercent = {
+  left: number
+  top: number
+  cardWidth: number
+  cardHeight: number
+  gapX: number
+  gapY: number
+}
+
+type CardAreaBufferPercent = {
+  left: number
+  right: number
+  top: number
+  bottom: number
+}
+
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
 
-const buildGridRegions = (width: number, height: number): GridCellRegion[] => {
+const isValidCardLayoutPercent = (layout: CardLayoutPercent): boolean => {
+  if (layout.cardWidth <= 0 || layout.cardHeight <= 0 || layout.gapX < 0 || layout.gapY < 0) {
+    return false
+  }
+
+  const totalWidth = layout.left + GRID_COLS * layout.cardWidth + (GRID_COLS - 1) * layout.gapX
+  const totalHeight = layout.top + GRID_ROWS * layout.cardHeight + (GRID_ROWS - 1) * layout.gapY
+
+  return layout.left >= 0 && layout.top >= 0 && totalWidth <= 1 && totalHeight <= 1
+}
+
+const isValidCardAreaBufferPercent = (buffer: CardAreaBufferPercent): boolean =>
+  buffer.left >= 0 && buffer.right >= 0 && buffer.top >= 0 && buffer.bottom >= 0
+
+const buildUniformGridRegions = (width: number, height: number): GridCellRegion[] => {
   const xEdges = Array.from({ length: GRID_COLS + 1 }, (_, index) => Math.round((index / GRID_COLS) * width))
   const yEdges = Array.from({ length: GRID_ROWS + 1 }, (_, index) => Math.round((index / GRID_ROWS) * height))
   const regions: GridCellRegion[] = []
@@ -101,6 +148,59 @@ const buildGridRegions = (width: number, height: number): GridCellRegion[] => {
 
       regions.push({
         copyRect: { left, top, right, bottom },
+        evalRect: { left: evalLeft, top: evalTop, right: evalRight, bottom: evalBottom },
+        evalPixelCount: Math.max(1, (evalRight - evalLeft) * (evalBottom - evalTop)),
+      })
+    }
+  }
+
+  return regions
+}
+
+const buildGridRegions = (width: number, height: number): GridCellRegion[] => {
+  const layout = PROCESSING_CONFIG.cardLayoutPercent
+  if (!isValidCardLayoutPercent(layout)) {
+    return buildUniformGridRegions(width, height)
+  }
+  const buffer = PROCESSING_CONFIG.cardAreaBufferPercent
+  const hasValidBuffer = isValidCardAreaBufferPercent(buffer)
+
+  const regions: GridCellRegion[] = []
+
+  for (let row = 0; row < GRID_ROWS; row += 1) {
+    for (let col = 0; col < GRID_COLS; col += 1) {
+      const leftPercent = layout.left + col * (layout.cardWidth + layout.gapX)
+      const topPercent = layout.top + row * (layout.cardHeight + layout.gapY)
+
+      const left = clamp(Math.round(leftPercent * width), 0, Math.max(0, width - 2))
+      const right = clamp(Math.round((leftPercent + layout.cardWidth) * width), left + 1, width)
+      const top = clamp(Math.round(topPercent * height), 0, Math.max(0, height - 2))
+      const bottom = clamp(Math.round((topPercent + layout.cardHeight) * height), top + 1, height)
+
+      const cellWidth = Math.max(1, right - left)
+      const cellHeight = Math.max(1, bottom - top)
+      const copyLeft = hasValidBuffer
+        ? clamp(left - Math.round(cellWidth * buffer.left), 0, Math.max(0, width - 2))
+        : left
+      const copyRight = hasValidBuffer
+        ? clamp(right + Math.round(cellWidth * buffer.right), copyLeft + 1, width)
+        : right
+      const copyTop = hasValidBuffer
+        ? clamp(top - Math.round(cellHeight * buffer.top), 0, Math.max(0, height - 2))
+        : top
+      const copyBottom = hasValidBuffer
+        ? clamp(bottom + Math.round(cellHeight * buffer.bottom), copyTop + 1, height)
+        : bottom
+      const insetX = Math.floor(cellWidth * CARD_EVAL_INSET_RATIO)
+      const insetY = Math.floor(cellHeight * CARD_EVAL_INSET_RATIO)
+
+      const evalLeft = clamp(left + insetX, left, right - 1)
+      const evalRight = clamp(right - insetX, evalLeft + 1, right)
+      const evalTop = clamp(top + insetY, top, bottom - 1)
+      const evalBottom = clamp(bottom - insetY, evalTop + 1, bottom)
+
+      regions.push({
+        copyRect: { left: copyLeft, top: copyTop, right: copyRight, bottom: copyBottom },
         evalRect: { left: evalLeft, top: evalTop, right: evalRight, bottom: evalBottom },
         evalPixelCount: Math.max(1, (evalRight - evalLeft) * (evalBottom - evalTop)),
       })
