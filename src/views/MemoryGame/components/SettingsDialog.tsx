@@ -37,7 +37,7 @@ const SettingsDialog = ({
                 <Checkbox.HiddenInput />
                 <Checkbox.Control />
                 <Checkbox.Label color="gray.600" fontWeight="semibold">
-                  Auto stop recording after 8 seconds
+                  Auto stop recording after 6 seconds
                 </Checkbox.Label>
               </Checkbox.Root>
 
