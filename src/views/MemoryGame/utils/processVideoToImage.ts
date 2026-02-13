@@ -63,6 +63,7 @@ const CARD_MAX_LOCAL_MOTION_RATIO = 0.25
 const CARD_CANDIDATE_LIMIT = 3
 const SHARPEN_STRENGTH = 0.35
 const BASELINE_SAMPLE_OFFSET_SECONDS = 0.1
+const MAX_PROCESSING_DURATION_SECONDS = 10
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
 
@@ -382,11 +383,16 @@ export const processVideoToImage = async (
       video.src = objectUrl
     })
 
-    // Seek helper with safe clamping. Some browsers throw/loop on out-of-range seeks near duration.
-    const seekTo = (requestedTime: number, options?: { preferFastSeek?: boolean }): Promise<void> => {
-      const maxTime = Number.isFinite(video.duration) ? Math.max(video.duration - 0.001, 0) : 0
+    const processingDuration =
+      Number.isFinite(video.duration) && video.duration > 0
+        ? Math.min(video.duration, MAX_PROCESSING_DURATION_SECONDS)
+        : 10
+    const toFrameTime = (frameIndex: number): number => frameIndex / PROCESSING_CONFIG.fps
+
+    // Seek helper with safe clamping. Firefox fastSeek may jump to the first keyframe.
+    const seekTo = (requestedTime: number): Promise<void> => {
+      const maxTime = Math.max(processingDuration - 0.001, 0)
       const targetTime = Math.min(Math.max(requestedTime, 0), maxTime)
-      const preferFastSeek = options?.preferFastSeek ?? false
 
       if (Math.abs(video.currentTime - targetTime) < 0.001) {
         return Promise.resolve()
@@ -408,11 +414,7 @@ export const processVideoToImage = async (
 
         video.addEventListener("seeked", handleSeeked, { once: true })
         video.addEventListener("error", handleError, { once: true })
-        if (preferFastSeek && typeof video.fastSeek === "function") {
-          video.fastSeek(targetTime)
-        } else {
-          video.currentTime = targetTime
-        }
+        video.currentTime = targetTime
       })
     }
 
@@ -437,7 +439,7 @@ export const processVideoToImage = async (
     analysisCanvas.width = Math.max(1, Math.floor(video.videoWidth * analysisScaleDown))
     analysisCanvas.height = Math.max(1, Math.floor(video.videoHeight * analysisScaleDown))
 
-    const frameCount = Math.max(1, Math.floor(video.duration * PROCESSING_CONFIG.fps))
+    const frameCount = Math.max(1, Math.floor(processingDuration * PROCESSING_CONFIG.fps))
     const analysisPixelCount = analysisCanvas.width * analysisCanvas.height
     const totalProgressFrames = frameCount * 2
 
@@ -451,7 +453,7 @@ export const processVideoToImage = async (
       - The small offset avoids edge cases where decoding the exact final timestamp fails.
     */
     onProgress?.(1, totalProgressFrames)
-    await seekTo(video.duration - BASELINE_SAMPLE_OFFSET_SECONDS, { preferFastSeek: true })
+    await seekTo(processingDuration - BASELINE_SAMPLE_OFFSET_SECONDS)
     analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
     const analysisBaselineData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
     outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
@@ -462,7 +464,7 @@ export const processVideoToImage = async (
     let previousFrameData: ImageData | null = null
 
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
-      await seekTo(frameIndex / PROCESSING_CONFIG.fps)
+      await seekTo(toFrameTime(frameIndex))
       analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
       const currentData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
       const currentPixels = currentData.data
@@ -506,7 +508,7 @@ export const processVideoToImage = async (
 
     for (let mergeIndex = 0; mergeIndex < mergeFrameCount; mergeIndex += 1) {
       const frameIndex = mergeFrameIndices[mergeIndex]
-      await seekTo(frameIndex / PROCESSING_CONFIG.fps)
+      await seekTo(toFrameTime(frameIndex))
       outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
       const currentData = outputCtx.getImageData(0, 0, outputCanvas.width, outputCanvas.height)
       const currentPixels = currentData.data
@@ -585,7 +587,7 @@ export const processVideoToImage = async (
         return cached
       }
 
-      await seekTo(frameIndex / PROCESSING_CONFIG.fps)
+      await seekTo(toFrameTime(frameIndex))
       outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
       const framePixels = outputCtx.getImageData(0, 0, outputCanvas.width, outputCanvas.height).data
       framePixelCache.set(frameIndex, framePixels)
