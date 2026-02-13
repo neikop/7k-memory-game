@@ -33,7 +33,7 @@ const RECORDING_TIMESLICE_MS = 250
 
 export const useRecordingController = ({
   autoStopEnabled,
-  autoStopSeconds = 6,
+  autoStopSeconds = 7,
   onRecordedBlob,
   onError,
 }: UseRecordingControllerArgs): UseRecordingControllerResult => {
