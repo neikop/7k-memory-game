@@ -63,6 +63,7 @@ const CARD_MAX_LOCAL_MOTION_RATIO = 0.25
 const CARD_CANDIDATE_LIMIT = 3
 const SHARPEN_STRENGTH = 0.35
 const BASELINE_SAMPLE_OFFSET_SECONDS = 0.1
+const PROCESSING_START_OFFSET_SECONDS = 4
 const MAX_PROCESSING_DURATION_SECONDS = 10
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
@@ -383,16 +384,18 @@ export const processVideoToImage = async (
       video.src = objectUrl
     })
 
-    const processingDuration =
+    const processingEndTime =
       Number.isFinite(video.duration) && video.duration > 0
         ? Math.min(video.duration, MAX_PROCESSING_DURATION_SECONDS)
-        : 10
-    const toFrameTime = (frameIndex: number): number => frameIndex / PROCESSING_CONFIG.fps
+        : MAX_PROCESSING_DURATION_SECONDS
+    const processingStartTime = Math.min(PROCESSING_START_OFFSET_SECONDS, Math.max(processingEndTime - 0.001, 0))
+    const processingDuration = Math.max(processingEndTime - processingStartTime, 0.001)
+    const toFrameTime = (frameIndex: number): number => processingStartTime + frameIndex / PROCESSING_CONFIG.fps
 
     // Seek helper with safe clamping. Firefox fastSeek may jump to the first keyframe.
     const seekTo = (requestedTime: number): Promise<void> => {
-      const maxTime = Math.max(processingDuration - 0.001, 0)
-      const targetTime = Math.min(Math.max(requestedTime, 0), maxTime)
+      const maxTime = Math.max(processingEndTime - 0.001, 0)
+      const targetTime = Math.min(Math.max(requestedTime, processingStartTime), maxTime)
 
       if (Math.abs(video.currentTime - targetTime) < 0.001) {
         return Promise.resolve()
@@ -418,7 +421,7 @@ export const processVideoToImage = async (
       })
     }
 
-    await seekTo(0)
+    await seekTo(processingStartTime)
 
     const outputCanvas = document.createElement("canvas")
     const outputCtx = outputCanvas.getContext("2d")
@@ -447,13 +450,13 @@ export const processVideoToImage = async (
 
     /*
       Baseline selection:
-      - We sample near the end (`duration - BASELINE_SAMPLE_OFFSET_SECONDS`) because this game
+      - We sample near the end of the processed range (`duration - BASELINE_SAMPLE_OFFSET_SECONDS`) because this game
         usually returns to a mostly face-down board in the final state.
       - That frame is used as a "reference board" to estimate which pixels are true card reveals.
       - The small offset avoids edge cases where decoding the exact final timestamp fails.
     */
     onProgress?.(1, totalProgressFrames)
-    await seekTo(processingDuration - BASELINE_SAMPLE_OFFSET_SECONDS)
+    await seekTo(processingEndTime - BASELINE_SAMPLE_OFFSET_SECONDS)
     analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
     const analysisBaselineData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
     outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
