@@ -164,8 +164,7 @@ const MemoryGame = () => {
 
               <ResultPanel
                 resultImage={resultImage}
-                processingCurrent={progress.current}
-                processingTotal={progress.total}
+                progress={progress}
                 isProcessing={isProcessing}
                 onClear={clearResult}
               />

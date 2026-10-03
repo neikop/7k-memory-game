@@ -1,6 +1,7 @@
 type FrameMetrics = {
   baselineRatio: number
   motionRatio: number
+  stableCardCount: number
 }
 
 type Rect = {
@@ -16,11 +17,6 @@ type GridCellRegion = {
   evalPixelCount: number
 }
 
-type CardCandidate = {
-  frameIndex: number
-  score: number
-}
-
 type CardLayoutPercent = {
   left: number
   top: number
@@ -33,4 +29,23 @@ type CardLayoutPercent = {
 type ErrorNotice = {
   title: string
   description: string
+}
+
+type VideoProcessingPhase =
+  | "loading"
+  | "preparing"
+  | "capturing"
+  | "waiting"
+  | "analyzing"
+  | "merging"
+  | "exporting"
+  | "complete"
+
+type VideoProcessingProgress = {
+  phase: VideoProcessingPhase
+  current: number
+  total: number
+  percent: number
+  videoTime?: number
+  startTime?: number
 }

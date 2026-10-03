@@ -1,3 +1,5 @@
+import { captureVideoFrames } from "./captureVideoFrames"
+
 /*
   Memory Game Video -> Result Image
 
@@ -46,10 +48,7 @@ const PROCESSING_CONFIG = {
 const MOTION_THRESHOLD = 14
 
 const ACTIVE_RANGE_RULES = {
-  minBaselineRatio: 0.015,
   maxBaselineRatio: 0.35,
-  minMotionRatio: 0.005,
-  minActiveStreak: 2,
   marginFrames: 2,
 }
 
@@ -60,16 +59,20 @@ const CARD_EVAL_INSET_RATIO = 0.12
 const CARD_COPY_BUFFER_RATIO = { left: 0.015, right: 0.015, top: 0.04, bottom: 0.02 }
 const CARD_MIN_DIFF_RATIO = 0.08
 const CARD_MAX_LOCAL_MOTION_RATIO = 0.25
-const CARD_CANDIDATE_LIMIT = 3
 const SHARPEN_STRENGTH = 0.35
-const BASELINE_SAMPLE_OFFSET_SECONDS = 0.1
-const PROCESSING_START_OFFSET_SECONDS = 4
 const MAX_PROCESSING_DURATION_SECONDS = 10
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max))
 
 const shouldEmitProgress = (completed: number, total: number): boolean =>
   completed % PROCESSING_CONFIG.progressUpdateInterval === 0 || completed === total
+
+// Let React commit progress and the browser paint between batches of pixel work.
+const yieldForPaint = (): Promise<void> =>
+  new Promise((resolve) => {
+    if (document.hidden) window.setTimeout(resolve, 0)
+    else window.requestAnimationFrame(() => window.setTimeout(resolve, 0))
+  })
 
 const isValidCardLayoutPercent = (layout: CardLayoutPercent): boolean => {
   if (layout.cardWidth <= 0 || layout.cardHeight <= 0 || layout.gapX < 0 || layout.gapY < 0) {
@@ -184,22 +187,6 @@ const getBrightnessDiff = (first: Uint8ClampedArray, second: Uint8ClampedArray, 
     Math.abs(first[offset + 2] - second[offset + 2])) /
   3
 
-const pushCardCandidate = (candidates: CardCandidate[], next: CardCandidate): void => {
-  const duplicate = candidates.find((candidate) => candidate.frameIndex === next.frameIndex)
-  if (duplicate) {
-    if (next.score > duplicate.score) {
-      duplicate.score = next.score
-    }
-  } else {
-    candidates.push(next)
-  }
-
-  candidates.sort((first, second) => second.score - first.score)
-  if (candidates.length > CARD_CANDIDATE_LIMIT) {
-    candidates.length = CARD_CANDIDATE_LIMIT
-  }
-}
-
 const countFrameDiffs = (
   currentPixels: Uint8ClampedArray,
   baselinePixels: Uint8ClampedArray,
@@ -251,64 +238,52 @@ const applySharpen = (imageData: ImageData, width: number, height: number, stren
   }
 }
 
-const isBaselineWithinActiveRange = (baselineRatio: number): boolean =>
-  baselineRatio >= ACTIVE_RANGE_RULES.minBaselineRatio && baselineRatio <= ACTIVE_RANGE_RULES.maxBaselineRatio
-
-const findActiveStreakRange = (candidate: boolean[]): { start: number; end: number } | null => {
-  let streak = 0
-  let firstActive = -1
-  let lastActive = -1
-
-  for (let index = 0; index < candidate.length; index += 1) {
-    if (candidate[index]) {
-      streak += 1
-      if (streak >= ACTIVE_RANGE_RULES.minActiveStreak) {
-        const streakStart = index - streak + 1
-        if (firstActive === -1) {
-          firstActive = streakStart
-        }
-        lastActive = index
+const countStableChangedCards = (
+  currentPixels: Uint8ClampedArray,
+  baselinePixels: Uint8ClampedArray,
+  previousPixels: Uint8ClampedArray | undefined,
+  imageWidth: number,
+  regions: GridCellRegion[],
+): number => {
+  let stableCardCount = 0
+  for (const { evalRect, evalPixelCount } of regions) {
+    let changedPixels = 0
+    let movingPixels = 0
+    for (let y = evalRect.top; y < evalRect.bottom; y += 1) {
+      for (let x = evalRect.left; x < evalRect.right; x += 1) {
+        const offset = (y * imageWidth + x) * 4
+        if (getBrightnessDiff(currentPixels, baselinePixels, offset) > PROCESSING_CONFIG.threshold) changedPixels += 1
+        if (previousPixels && getBrightnessDiff(currentPixels, previousPixels, offset) > MOTION_THRESHOLD)
+          movingPixels += 1
       }
-    } else {
-      streak = 0
+    }
+    if (
+      changedPixels / evalPixelCount >= CARD_MIN_DIFF_RATIO &&
+      movingPixels / evalPixelCount <= CARD_MAX_LOCAL_MOTION_RATIO
+    ) {
+      stableCardCount += 1
     }
   }
-
-  if (firstActive === -1 || lastActive === -1) {
-    return null
-  }
-
-  return {
-    start: Math.max(0, firstActive - ACTIVE_RANGE_RULES.marginFrames),
-    end: Math.min(candidate.length - 1, lastActive + ACTIVE_RANGE_RULES.marginFrames),
-  }
+  return stableCardCount
 }
+
+const hasStableCardContent = ({ baselineRatio, stableCardCount }: FrameMetrics): boolean =>
+  stableCardCount > 0 && baselineRatio <= ACTIVE_RANGE_RULES.maxBaselineRatio
 
 const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: number } => {
   if (metrics.length === 0) {
     return { start: 0, end: 0 }
   }
 
-  const strictCandidate = metrics.map(({ baselineRatio, motionRatio }) => {
-    return isBaselineWithinActiveRange(baselineRatio) && motionRatio >= ACTIVE_RANGE_RULES.minMotionRatio
-  })
-
-  const strictRange = findActiveStreakRange(strictCandidate)
-  if (strictRange) {
-    return strictRange
-  }
-
-  // Fallback: motion-only range helps when baseline-ratio heuristics are too strict
-  // (for example long idle at the beginning or unusual board state near the end).
-  const maxMotionRatio = metrics.reduce((max, metric) => Math.max(max, metric.motionRatio), 0)
-  const fallbackMotionThreshold = Math.max(ACTIVE_RANGE_RULES.minMotionRatio, maxMotionRatio * 0.35)
-  const fallbackBaselineThreshold = ACTIVE_RANGE_RULES.minBaselineRatio * 0.5
-  const motionCandidate = metrics.map(({ baselineRatio, motionRatio }) => {
-    return motionRatio >= fallbackMotionThreshold && baselineRatio >= fallbackBaselineThreshold
-  })
-  const motionRange = findActiveStreakRange(motionCandidate)
-  if (motionRange) {
-    return motionRange
+  const firstActive = metrics.findIndex(hasStableCardContent)
+  let lastActive = metrics.length - 1
+  while (lastActive > firstActive && !hasStableCardContent(metrics[lastActive])) lastActive -= 1
+  if (firstActive !== -1) {
+    // Keep isolated early reveals too; a later motion streak must not trim them away.
+    return {
+      start: Math.max(0, firstActive - ACTIVE_RANGE_RULES.marginFrames),
+      end: Math.min(metrics.length - 1, lastActive + ACTIVE_RANGE_RULES.marginFrames),
+    }
   }
 
   // If all detection fails, keep everything to avoid returning an empty result.
@@ -318,31 +293,15 @@ const detectActiveFrameRange = (metrics: FrameMetrics[]): { start: number; end: 
 const buildMergeFrameIndices = (metrics: FrameMetrics[], range: { start: number; end: number }): number[] => {
   const filtered: number[] = []
 
-  // Prefer frames with board-like baseline difference; this removes overlays/transitions.
+  // Evaluate each card, so a single reveal can survive even with little whole-frame change.
   for (let frameIndex = range.start; frameIndex <= range.end; frameIndex += 1) {
-    if (isBaselineWithinActiveRange(metrics[frameIndex].baselineRatio)) {
+    if (hasStableCardContent(metrics[frameIndex])) {
       filtered.push(frameIndex)
     }
   }
 
   if (filtered.length > 0) {
     return filtered
-  }
-
-  const motionFallback: number[] = []
-  const maxMotionRatio = metrics
-    .slice(range.start, range.end + 1)
-    .reduce((max, metric) => Math.max(max, metric.motionRatio), 0)
-  const motionThreshold = Math.max(ACTIVE_RANGE_RULES.minMotionRatio, maxMotionRatio * 0.35)
-  const baselineThreshold = ACTIVE_RANGE_RULES.minBaselineRatio * 0.5
-  for (let frameIndex = range.start; frameIndex <= range.end; frameIndex += 1) {
-    if (metrics[frameIndex].motionRatio >= motionThreshold && metrics[frameIndex].baselineRatio >= baselineThreshold) {
-      motionFallback.push(frameIndex)
-    }
-  }
-
-  if (motionFallback.length > 0) {
-    return motionFallback
   }
 
   // Safety fallback: if filtering is too strict for a specific recording, merge the whole active range.
@@ -355,283 +314,201 @@ const buildMergeFrameIndices = (metrics: FrameMetrics[], range: { start: number;
 
 export const processVideoToImage = async (
   blob: Blob,
-  onProgress?: (current: number, total: number) => void,
+  onProgress?: (progress: VideoProcessingProgress) => void,
 ): Promise<string> => {
-  // Browser-only decode path: HTMLVideoElement + Canvas (no ffmpeg/OpenCV dependency).
-  const video = document.createElement("video")
-  video.preload = "auto"
-  video.muted = true
-  video.playsInline = true
-  const objectUrl = URL.createObjectURL(blob)
+  const frames = await captureVideoFrames(blob, {
+    fps: PROCESSING_CONFIG.fps,
+    scaleDown: PROCESSING_CONFIG.scaleDown,
+    startTime: 0,
+    endTime: MAX_PROCESSING_DURATION_SECONDS,
+    onProgress: (current, total, details) =>
+      onProgress?.({
+        phase: details.phase,
+        current,
+        total,
+        percent: Math.min(80, (80 * details.videoTime) / details.endTime),
+        videoTime: details.videoTime,
+        startTime: details.startTime,
+      }),
+  })
+  return processVideoFramesToImage(frames, onProgress)
+}
 
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const handleLoaded = () => {
-        cleanup()
-        resolve()
-      }
-      const handleError = () => {
-        cleanup()
-        reject(new Error("Unable to load video metadata"))
-      }
-      const cleanup = () => {
-        video.removeEventListener("loadedmetadata", handleLoaded)
-        video.removeEventListener("error", handleError)
-      }
+export const processVideoFramesToImage = async (
+  frames: ImageData[],
+  onProgress?: (progress: VideoProcessingProgress) => void,
+): Promise<string> => {
+  if (frames.length === 0) throw new Error("Video contains no decodable frames")
+  const frameCount = frames.length
+  onProgress?.({ phase: "analyzing", current: 0, total: frameCount, percent: 80 })
+  await yieldForPaint()
 
-      video.addEventListener("loadedmetadata", handleLoaded, { once: true })
-      video.addEventListener("error", handleError, { once: true })
-      video.src = objectUrl
-    })
+  const outputCanvas = document.createElement("canvas")
+  const outputCtx = outputCanvas.getContext("2d")
+  if (!outputCtx) {
+    throw new Error("Canvas 2D context is not available")
+  }
 
-    const processingEndTime =
-      Number.isFinite(video.duration) && video.duration > 0
-        ? Math.min(video.duration, MAX_PROCESSING_DURATION_SECONDS)
-        : MAX_PROCESSING_DURATION_SECONDS
-    const processingStartTime = Math.min(PROCESSING_START_OFFSET_SECONDS, Math.max(processingEndTime - 0.001, 0))
-    const processingDuration = Math.max(processingEndTime - processingStartTime, 0.001)
-    const toFrameTime = (frameIndex: number): number => processingStartTime + frameIndex / PROCESSING_CONFIG.fps
+  const analysisCanvas = document.createElement("canvas")
+  const analysisCtx = analysisCanvas.getContext("2d")
+  if (!analysisCtx) {
+    throw new Error("Canvas 2D context is not available")
+  }
 
-    // Seek helper with safe clamping. Firefox fastSeek may jump to the first keyframe.
-    const seekTo = (requestedTime: number): Promise<void> => {
-      const maxTime = Math.max(processingEndTime - 0.001, 0)
-      const targetTime = Math.min(Math.max(requestedTime, processingStartTime), maxTime)
+  outputCanvas.width = frames[0].width
+  outputCanvas.height = frames[0].height
 
-      if (Math.abs(video.currentTime - targetTime) < 0.001) {
-        return Promise.resolve()
-      }
+  const analysisScaleDown = Math.min(PROCESSING_CONFIG.scaleDown, ANALYSIS_SCALE_DOWN)
+  analysisCanvas.width = Math.max(1, Math.floor((outputCanvas.width * analysisScaleDown) / PROCESSING_CONFIG.scaleDown))
+  analysisCanvas.height = Math.max(
+    1,
+    Math.floor((outputCanvas.height * analysisScaleDown) / PROCESSING_CONFIG.scaleDown),
+  )
 
-      return new Promise((resolve, reject) => {
-        const handleSeeked = () => {
-          cleanup()
-          resolve()
-        }
-        const handleError = () => {
-          cleanup()
-          reject(new Error("Unable to seek video frame"))
-        }
-        const cleanup = () => {
-          video.removeEventListener("seeked", handleSeeked)
-          video.removeEventListener("error", handleError)
-        }
+  const analysisPixelCount = analysisCanvas.width * analysisCanvas.height
+  const analysisRegions = buildGridRegions(analysisCanvas.width, analysisCanvas.height)
+  // The last sampled frame is the reference board, normally with cards face-down.
+  const baselineData = frames[frameCount - 1]
+  outputCtx.putImageData(baselineData, 0, 0)
+  analysisCtx.drawImage(outputCanvas, 0, 0, analysisCanvas.width, analysisCanvas.height)
+  const analysisBaselineData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
 
-        video.addEventListener("seeked", handleSeeked, { once: true })
-        video.addEventListener("error", handleError, { once: true })
-        video.currentTime = targetTime
-      })
-    }
+  // Phase 1: analyze frame metrics to detect the active card-flip range.
+  const frameMetrics: FrameMetrics[] = new Array(frameCount)
+  let previousFrameData: ImageData | null = null
 
-    await seekTo(processingStartTime)
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    outputCtx.putImageData(frames[frameIndex], 0, 0)
+    analysisCtx.drawImage(outputCanvas, 0, 0, analysisCanvas.width, analysisCanvas.height)
+    const currentData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
+    const currentPixels = currentData.data
+    const baselinePixels = analysisBaselineData.data
+    const previousPixels = previousFrameData?.data
 
-    const outputCanvas = document.createElement("canvas")
-    const outputCtx = outputCanvas.getContext("2d")
-    if (!outputCtx) {
-      throw new Error("Canvas 2D context is not available")
-    }
+    const { baselineChanged, motionChanged } = countFrameDiffs(
+      currentPixels,
+      baselinePixels,
+      PROCESSING_CONFIG.threshold,
+      previousPixels,
+    )
 
-    const analysisCanvas = document.createElement("canvas")
-    const analysisCtx = analysisCanvas.getContext("2d")
-    if (!analysisCtx) {
-      throw new Error("Canvas 2D context is not available")
-    }
-
-    outputCanvas.width = Math.max(1, Math.floor(video.videoWidth * PROCESSING_CONFIG.scaleDown))
-    outputCanvas.height = Math.max(1, Math.floor(video.videoHeight * PROCESSING_CONFIG.scaleDown))
-
-    const analysisScaleDown = Math.min(PROCESSING_CONFIG.scaleDown, ANALYSIS_SCALE_DOWN)
-    analysisCanvas.width = Math.max(1, Math.floor(video.videoWidth * analysisScaleDown))
-    analysisCanvas.height = Math.max(1, Math.floor(video.videoHeight * analysisScaleDown))
-
-    const frameCount = Math.max(1, Math.floor(processingDuration * PROCESSING_CONFIG.fps))
-    const analysisPixelCount = analysisCanvas.width * analysisCanvas.height
-    const totalProgressFrames = frameCount * 2
-
-    onProgress?.(0, totalProgressFrames)
-
-    /*
-      Baseline selection:
-      - We sample near the end of the processed range (`duration - BASELINE_SAMPLE_OFFSET_SECONDS`) because this game
-        usually returns to a mostly face-down board in the final state.
-      - That frame is used as a "reference board" to estimate which pixels are true card reveals.
-      - The small offset avoids edge cases where decoding the exact final timestamp fails.
-    */
-    onProgress?.(1, totalProgressFrames)
-    await seekTo(processingEndTime - BASELINE_SAMPLE_OFFSET_SECONDS)
-    analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
-    const analysisBaselineData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
-    outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
-    const baselineData = outputCtx.getImageData(0, 0, outputCanvas.width, outputCanvas.height)
-
-    // Phase 1: analyze frame metrics to detect the active card-flip range.
-    const frameMetrics: FrameMetrics[] = new Array(frameCount)
-    let previousFrameData: ImageData | null = null
-
-    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
-      await seekTo(toFrameTime(frameIndex))
-      analysisCtx.drawImage(video, 0, 0, analysisCanvas.width, analysisCanvas.height)
-      const currentData = analysisCtx.getImageData(0, 0, analysisCanvas.width, analysisCanvas.height)
-      const currentPixels = currentData.data
-      const baselinePixels = analysisBaselineData.data
-      const previousPixels = previousFrameData?.data
-
-      const { baselineChanged, motionChanged } = countFrameDiffs(
+    frameMetrics[frameIndex] = {
+      baselineRatio: baselineChanged / analysisPixelCount,
+      motionRatio: previousFrameData ? motionChanged / analysisPixelCount : 0,
+      stableCardCount: countStableChangedCards(
         currentPixels,
         baselinePixels,
-        PROCESSING_CONFIG.threshold,
         previousPixels,
-      )
-
-      frameMetrics[frameIndex] = {
-        baselineRatio: baselineChanged / analysisPixelCount,
-        motionRatio: previousFrameData ? motionChanged / analysisPixelCount : 0,
-      }
-      previousFrameData = currentData
-
-      const analyzedFrames = frameIndex + 1
-      if (shouldEmitProgress(analyzedFrames, frameCount)) {
-        onProgress?.(analyzedFrames, totalProgressFrames)
-      }
+        analysisCanvas.width,
+        analysisRegions,
+      ),
     }
+    previousFrameData = currentData
 
-    const activeRange = detectActiveFrameRange(frameMetrics)
-    const mergeFrameIndices = buildMergeFrameIndices(frameMetrics, activeRange)
-
-    const mergeFrameCount = mergeFrameIndices.length
-
-    // Phase 2: card-aware merge (8x3 grid). Pick the sharpest revealed state per card.
-    const result = outputCtx.createImageData(outputCanvas.width, outputCanvas.height)
-    result.data.set(baselineData.data)
-    const baselinePixels = baselineData.data
-    const resultPixels = result.data
-    const gridRegions = buildGridRegions(outputCanvas.width, outputCanvas.height)
-    const bestCellScores = new Float32Array(gridRegions.length).fill(-1)
-    // Keep top candidates per cell so fallback can fill partial misses.
-    const cellCandidates: CardCandidate[][] = Array.from({ length: gridRegions.length }, () => [])
-    let previousMergePixels: Uint8ClampedArray | null = null
-
-    for (let mergeIndex = 0; mergeIndex < mergeFrameCount; mergeIndex += 1) {
-      const frameIndex = mergeFrameIndices[mergeIndex]
-      await seekTo(toFrameTime(frameIndex))
-      outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
-      const currentData = outputCtx.getImageData(0, 0, outputCanvas.width, outputCanvas.height)
-      const currentPixels = currentData.data
-
-      for (let cellIndex = 0; cellIndex < gridRegions.length; cellIndex += 1) {
-        const { evalRect, evalPixelCount, copyRect } = gridRegions[cellIndex]
-        let changedPixels = 0
-        let brightnessSum = 0
-        let brightnessSqSum = 0
-        let localMotionPixels = 0
-
-        for (let y = evalRect.top; y < evalRect.bottom; y += 1) {
-          for (let x = evalRect.left; x < evalRect.right; x += 1) {
-            const offset = (y * outputCanvas.width + x) * 4
-            const currentBrightness =
-              (currentPixels[offset] + currentPixels[offset + 1] + currentPixels[offset + 2]) / 3
-
-            if (getBrightnessDiff(currentPixels, baselinePixels, offset) > PROCESSING_CONFIG.threshold) {
-              changedPixels += 1
-            }
-
-            if (
-              previousMergePixels &&
-              getBrightnessDiff(currentPixels, previousMergePixels, offset) > MOTION_THRESHOLD
-            ) {
-              localMotionPixels += 1
-            }
-
-            brightnessSum += currentBrightness
-            brightnessSqSum += currentBrightness * currentBrightness
-          }
-        }
-
-        const changedRatio = changedPixels / evalPixelCount
-        if (changedRatio < CARD_MIN_DIFF_RATIO) {
-          // Not enough revealed content in this cell yet.
-          continue
-        }
-
-        const localMotionRatio = previousMergePixels
-          ? localMotionPixels / evalPixelCount
-          : frameMetrics[frameIndex].motionRatio
-        if (localMotionRatio > CARD_MAX_LOCAL_MOTION_RATIO) {
-          // Skip frames where this cell is likely in transition blur.
-          continue
-        }
-
-        const meanBrightness = brightnessSum / evalPixelCount
-        const brightnessVariance = Math.max(0, brightnessSqSum / evalPixelCount - meanBrightness * meanBrightness)
-        const motionPenalty = 1 / (1 + localMotionRatio * 25)
-        // Higher variance often means richer face-up card detail (text/icon), not a flat back-face.
-        const score = changedRatio * brightnessVariance * motionPenalty
-
-        pushCardCandidate(cellCandidates[cellIndex], { frameIndex, score })
-
-        if (score > bestCellScores[cellIndex]) {
-          bestCellScores[cellIndex] = score
-          copyRectPixels(currentPixels, resultPixels, outputCanvas.width, copyRect)
-        }
-      }
-
-      const activeProgress = mergeIndex + 1
-      if (shouldEmitProgress(activeProgress, mergeFrameCount)) {
-        const mergeProgressFrames = Math.max(1, Math.round((activeProgress / mergeFrameCount) * frameCount))
-        onProgress?.(frameCount + mergeProgressFrames, totalProgressFrames)
-      }
-
-      previousMergePixels = currentPixels
+    const analyzedFrames = frameIndex + 1
+    if (shouldEmitProgress(analyzedFrames, frameCount)) {
+      onProgress?.({
+        phase: "analyzing",
+        current: analyzedFrames,
+        total: frameCount,
+        percent: 80 + (10 * analyzedFrames) / frameCount,
+      })
+      await yieldForPaint()
     }
+  }
 
-    // Fill unresolved card pixels from fallback candidates to avoid half-card artifacts.
-    const framePixelCache = new Map<number, Uint8ClampedArray>()
-    const getFramePixels = async (frameIndex: number): Promise<Uint8ClampedArray> => {
-      const cached = framePixelCache.get(frameIndex)
-      if (cached) {
-        return cached
-      }
+  const activeRange = detectActiveFrameRange(frameMetrics)
+  const mergeFrameIndices = buildMergeFrameIndices(frameMetrics, activeRange)
 
-      await seekTo(toFrameTime(frameIndex))
-      outputCtx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height)
-      const framePixels = outputCtx.getImageData(0, 0, outputCanvas.width, outputCanvas.height).data
-      framePixelCache.set(frameIndex, framePixels)
-      return framePixels
-    }
+  const mergeFrameCount = mergeFrameIndices.length
+  onProgress?.({ phase: "merging", current: 0, total: mergeFrameCount, percent: 90 })
+  await yieldForPaint()
+
+  // Phase 2: card-aware merge (8x3 grid). Pick the sharpest revealed state per card.
+  const result = outputCtx.createImageData(outputCanvas.width, outputCanvas.height)
+  result.data.set(baselineData.data)
+  const baselinePixels = baselineData.data
+  const resultPixels = result.data
+  const gridRegions = buildGridRegions(outputCanvas.width, outputCanvas.height)
+  const bestCellScores = new Float32Array(gridRegions.length).fill(-1)
+
+  for (let mergeIndex = 0; mergeIndex < mergeFrameCount; mergeIndex += 1) {
+    const frameIndex = mergeFrameIndices[mergeIndex]
+    const currentPixels = frames[frameIndex].data
+    const previousMergePixels = frames[frameIndex - 1]?.data
 
     for (let cellIndex = 0; cellIndex < gridRegions.length; cellIndex += 1) {
-      const candidates = cellCandidates[cellIndex]
-      if (candidates.length < 2) {
+      const { evalRect, evalPixelCount, copyRect } = gridRegions[cellIndex]
+      let changedPixels = 0
+      let brightnessSum = 0
+      let brightnessSqSum = 0
+      let localMotionPixels = 0
+
+      for (let y = evalRect.top; y < evalRect.bottom; y += 1) {
+        for (let x = evalRect.left; x < evalRect.right; x += 1) {
+          const offset = (y * outputCanvas.width + x) * 4
+          const currentBrightness = (currentPixels[offset] + currentPixels[offset + 1] + currentPixels[offset + 2]) / 3
+
+          if (getBrightnessDiff(currentPixels, baselinePixels, offset) > PROCESSING_CONFIG.threshold) {
+            changedPixels += 1
+          }
+
+          if (previousMergePixels && getBrightnessDiff(currentPixels, previousMergePixels, offset) > MOTION_THRESHOLD) {
+            localMotionPixels += 1
+          }
+
+          brightnessSum += currentBrightness
+          brightnessSqSum += currentBrightness * currentBrightness
+        }
+      }
+
+      const changedRatio = changedPixels / evalPixelCount
+      if (changedRatio < CARD_MIN_DIFF_RATIO) {
+        // Not enough revealed content in this cell yet.
         continue
       }
 
-      const { copyRect } = gridRegions[cellIndex]
-      for (let fallbackIndex = 1; fallbackIndex < candidates.length; fallbackIndex += 1) {
-        const fallbackPixels = await getFramePixels(candidates[fallbackIndex].frameIndex)
-        for (let y = copyRect.top; y < copyRect.bottom; y += 1) {
-          for (let x = copyRect.left; x < copyRect.right; x += 1) {
-            const offset = (y * outputCanvas.width + x) * 4
-            if (getBrightnessDiff(resultPixels, baselinePixels, offset) > PROCESSING_CONFIG.threshold) {
-              continue
-            }
+      const localMotionRatio = previousMergePixels
+        ? localMotionPixels / evalPixelCount
+        : frameMetrics[frameIndex].motionRatio
+      if (localMotionRatio > CARD_MAX_LOCAL_MOTION_RATIO) {
+        // Skip frames where this cell is likely in transition blur.
+        continue
+      }
 
-            if (getBrightnessDiff(fallbackPixels, baselinePixels, offset) <= PROCESSING_CONFIG.threshold) {
-              continue
-            }
+      const meanBrightness = brightnessSum / evalPixelCount
+      const brightnessVariance = Math.max(0, brightnessSqSum / evalPixelCount - meanBrightness * meanBrightness)
+      const motionPenalty = 1 / (1 + localMotionRatio * 25)
+      // Higher variance often means richer face-up card detail (text/icon), not a flat back-face.
+      const score = changedRatio * brightnessVariance * motionPenalty
 
-            resultPixels[offset] = fallbackPixels[offset]
-            resultPixels[offset + 1] = fallbackPixels[offset + 1]
-            resultPixels[offset + 2] = fallbackPixels[offset + 2]
-            resultPixels[offset + 3] = 255
-          }
-        }
+      if (score > bestCellScores[cellIndex]) {
+        bestCellScores[cellIndex] = score
+        copyRectPixels(currentPixels, resultPixels, outputCanvas.width, copyRect)
       }
     }
 
-    onProgress?.(totalProgressFrames, totalProgressFrames)
-
-    applySharpen(result, outputCanvas.width, outputCanvas.height, SHARPEN_STRENGTH)
-    outputCtx.putImageData(result, 0, 0)
-    return outputCanvas.toDataURL("image/png")
-  } finally {
-    URL.revokeObjectURL(objectUrl)
+    const activeProgress = mergeIndex + 1
+    if (shouldEmitProgress(activeProgress, mergeFrameCount)) {
+      onProgress?.({
+        phase: "merging",
+        current: activeProgress,
+        total: mergeFrameCount,
+        percent: 90 + (8 * activeProgress) / mergeFrameCount,
+      })
+      await yieldForPaint()
+    }
   }
+
+  // Keep each selected card as one coherent frame. Mixing individual pixels
+  // from other candidates can stamp Ready/Start text or a rotating back onto its face.
+
+  onProgress?.({ phase: "exporting", current: frameCount, total: frameCount, percent: 98 })
+  await yieldForPaint()
+
+  applySharpen(result, outputCanvas.width, outputCanvas.height, SHARPEN_STRENGTH)
+  outputCtx.putImageData(result, 0, 0)
+  const resultImage = outputCanvas.toDataURL("image/png")
+  onProgress?.({ phase: "complete", current: frameCount, total: frameCount, percent: 100 })
+  return resultImage
 }

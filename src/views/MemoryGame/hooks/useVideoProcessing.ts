@@ -1,16 +1,11 @@
 import { useCallback, useState } from "react"
 import { processVideoToImage } from "../utils"
 
-type ProgressState = {
-  current: number
-  total: number
-}
-
 type UseVideoProcessingArgs = {
   onError?: (error: ErrorNotice) => void
 }
 
-const INITIAL_PROGRESS: ProgressState = { current: 0, total: 0 }
+const INITIAL_PROGRESS: VideoProcessingProgress = { phase: "loading", current: 0, total: 0, percent: 0 }
 
 const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error) {
@@ -22,7 +17,7 @@ const getErrorMessage = (error: unknown): string => {
 
 export const useVideoProcessing = ({ onError }: UseVideoProcessingArgs = {}) => {
   const [isProcessing, setIsProcessing] = useState(false)
-  const [progress, setProgress] = useState<ProgressState>(INITIAL_PROGRESS)
+  const [progress, setProgress] = useState<VideoProcessingProgress>(INITIAL_PROGRESS)
   const [resultImage, setResultImage] = useState<string | null>(null)
 
   const clearResult = useCallback(() => {
@@ -37,9 +32,7 @@ export const useVideoProcessing = ({ onError }: UseVideoProcessingArgs = {}) => 
       setResultImage(null)
 
       try {
-        const result = await processVideoToImage(blob, (current, total) => {
-          setProgress({ current, total })
-        })
+        const result = await processVideoToImage(blob, setProgress)
         setResultImage(result)
       } catch (error) {
         onError?.({

@@ -40,7 +40,10 @@ const formatRunTimestamp = (date: Date): string => {
   ].join("")
 }
 
-test("processes all videos in artifacts/input and exports png outputs in a timestamped folder", async ({ page }) => {
+test("processes all videos in artifacts/input and exports png outputs in a timestamped folder", async ({
+  page,
+  browserName,
+}) => {
   const perFileProcessTimeoutMs = DEFAULT_PER_FILE_PROCESS_TIMEOUT_MS
 
   const entries = await fs.readdir(INPUT_DIR, { withFileTypes: true })
@@ -52,7 +55,7 @@ test("processes all videos in artifacts/input and exports png outputs in a times
   expect(videoFiles.length).toBeGreaterThan(0)
 
   const runFolderName = formatRunTimestamp(new Date())
-  const outputDir = path.join(OUTPUT_ROOT_DIR, runFolderName)
+  const outputDir = path.join(OUTPUT_ROOT_DIR, runFolderName, browserName)
   await fs.mkdir(outputDir, { recursive: true })
 
   await page.goto("/")
@@ -68,8 +71,42 @@ test("processes all videos in artifacts/input and exports png outputs in a times
 
     await withTimeout(
       async () => {
+        await page.evaluate(() => {
+          const history: string[] = []
+          const state = window as typeof window & {
+            processingPhaseHistory: string[]
+            progressObserver?: MutationObserver
+          }
+          state.progressObserver?.disconnect()
+          state.processingPhaseHistory = history
+          state.progressObserver = new MutationObserver(() => {
+            const phase = document.querySelector('[data-testid="processing-status"]')?.getAttribute("data-phase")
+            if (phase && history.at(-1) !== phase) history.push(phase)
+          })
+          state.progressObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["data-phase"],
+          })
+        })
         await page.setInputFiles(fileInputSelector, fullInputPath)
         await expect(resultImage).toBeVisible({ timeout: perFileProcessTimeoutMs })
+        const phaseHistory = await page.evaluate(() => {
+          const state = window as typeof window & {
+            processingPhaseHistory: string[]
+            progressObserver: MutationObserver
+          }
+          state.progressObserver.disconnect()
+          return state.processingPhaseHistory
+        })
+        expect(phaseHistory).toEqual(
+          expect.arrayContaining(["capturing", "analyzing", "merging", "exporting", "complete"]),
+        )
+        const status = page.getByTestId("processing-status")
+        await expect(status).toHaveAttribute("data-phase", "complete")
+        await expect(status).toContainText("100%")
+        await expect(status).toContainText(/Solution created from \d+ captured frames/)
 
         const src = await resultImage.getAttribute("src")
         if (!src || !src.startsWith("data:image/png;base64,")) {
